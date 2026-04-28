@@ -1,32 +1,82 @@
 from dotenv import load_dotenv
 from openai import OpenAI
+#import google.generativeai as genai
 import json
 import os
 import requests
 from pypdf import PdfReader
 import gradio as gr
 
+from sendgrid import SendGridAPIClient
+from sendgrid.helpers.mail import Mail
 
 load_dotenv(override=True)
 
-def push(text):
-    requests.post(
-        "https://api.pushover.net/1/messages.json",
-        data={
-            "token": os.getenv("PUSHOVER_TOKEN"),
-            "user": os.getenv("PUSHOVER_USER"),
-            "message": text,
-        }
-    )
+import os
+CONTACTS_FILE = os.path.join(os.path.dirname(__file__), "contacts.json")
 
 
 def record_user_details(email, name="Name not provided", notes="not provided"):
-    push(f"Recording {name} with email {email} and notes {notes}")
+    data = {"email": email, "name": name, "notes": notes}
+    print(f"Writing contact info to {CONTACTS_FILE}", flush=True)
+    
+    # Initialize file if it doesn’t exist
+    if not os.path.exists(CONTACTS_FILE):
+        with open(CONTACTS_FILE, "w") as f:
+            json.dump([], f)
+    
+    # Append new record
+    with open(CONTACTS_FILE, "r+") as f:
+        contacts = json.load(f)
+        contacts.append(data)
+        f.seek(0)
+        json.dump(contacts, f, indent=2)
+    
     return {"recorded": "ok"}
 
 def record_unknown_question(question):
-    push(f"Recording {question}")
+    data = {"question": question}
+    
+    if not os.path.exists(CONTACTS_FILE):
+        with open(CONTACTS_FILE, "w") as f:
+            json.dump([], f)
+    
+    with open(CONTACTS_FILE, "r+") as f:
+        contacts = json.load(f)
+        contacts.append(data)
+        f.seek(0)
+        json.dump(contacts, f, indent=2)
+    
     return {"recorded": "ok"}
+
+
+
+
+"""def send_email(text):
+    message = Mail(
+        from_email=os.getenv("SENDER_EMAIL"),
+        to_emails=os.getenv("RECEIVER_EMAIL"),
+        subject="Notification from Chatbot",
+        plain_text_content=text
+    )
+    try:
+        sg = SendGridAPIClient(os.getenv("SENDGRID_API_KEY"))
+        sg.send(message)
+        print("Email sent successfully")
+    except Exception as e:
+        print(f"Error sending email: {e}")
+
+
+
+def record_user_details(email, name="Name not provided", notes="not provided"):
+    send_email(f"Recording {name} with email {email} and notes {notes}")
+    return {"recorded": "ok"}
+
+def record_unknown_question(question):
+    send_email(f"Recording {question}")
+    return {"recorded": "ok"}
+"""
+
 
 record_user_details_json = {
     "name": "record_user_details",
@@ -76,15 +126,18 @@ tools = [{"type": "function", "function": record_user_details_json},
 class Me:
 
     def __init__(self):
-        self.openai = OpenAI()
-        self.name = "Ed Donner"
-        reader = PdfReader("me/linkedin.pdf")
+        self.api_key = os.getenv("GOOGLE_API_KEY")
+        self.base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
+        self.name = "Rahul Shrivastava"
+        reader = PdfReader("1_foundations/me/linkedin.pdf")
         self.linkedin = ""
+        self.gemini = OpenAI(base_url=self.base_url, api_key=self.api_key)
+
         for page in reader.pages:
             text = page.extract_text()
             if text:
                 self.linkedin += text
-        with open("me/summary.txt", "r", encoding="utf-8") as f:
+        with open("1_foundations/me/summary.txt", "r", encoding="utf-8") as f:
             self.summary = f.read()
 
 
@@ -112,11 +165,12 @@ If the user is engaging in discussion, try to steer them towards getting in touc
         system_prompt += f"With this context, please chat with the user, always staying in character as {self.name}."
         return system_prompt
     
-    def chat(self, message, history):
+    """  def chat(self, message, history):
         messages = [{"role": "system", "content": self.system_prompt()}] + history + [{"role": "user", "content": message}]
         done = False
         while not done:
             response = self.openai.chat.completions.create(model="gpt-4o-mini", messages=messages, tools=tools)
+
             if response.choices[0].finish_reason=="tool_calls":
                 message = response.choices[0].message
                 tool_calls = message.tool_calls
@@ -126,9 +180,25 @@ If the user is engaging in discussion, try to steer them towards getting in touc
             else:
                 done = True
         return response.choices[0].message.content
-    
+    """
+    def chat(self, message, history):
+        messages = [{"role": "system", "content": self.system_prompt()}] + history + [{"role": "user", "content": message}]
+        response = self.gemini.chat.completions.create(model="gemini-2.5-flash", messages=messages)
+        reply = response.choices[0].message.content
+
+    # Try to parse as JSON tool call
+        try:
+            tool_call = json.loads(reply)
+            if tool_call["tool"] == "record_user_details":
+                return record_user_details(tool_call["email"], tool_call.get("name"), tool_call.get("notes"))
+            elif tool_call["tool"] == "record_unknown_question":
+                return record_unknown_question(tool_call["question"])
+        except Exception:
+            # If not JSON, just return the text
+            return reply
+
 
 if __name__ == "__main__":
     me = Me()
-    gr.ChatInterface(me.chat, type="messages").launch()
+    gr.ChatInterface(me.chat, type="messages").launch(share=True)
     
